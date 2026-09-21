@@ -308,5 +308,27 @@ class TestSuggestPostponements(unittest.TestCase):
         self.assertEqual(plan["conflicts"], [])
 
 
+class TestAdHocFlag(unittest.TestCase):
+    """The ad_hoc marker flows from the item row into timeline segments."""
+
+    def test_ad_hoc_flag_in_original_plan(self):
+        adhoc = item(1, "T", 20, 10)
+        adhoc["ad_hoc"] = 1
+        plan = build_original(dt(9), dt(10), [adhoc, item(2, "B", 20, 10)], [])
+        segs = by_id(plan)
+        self.assertTrue(segs["1"]["ad_hoc"])
+        self.assertFalse(segs["2"]["ad_hoc"])
+
+    def test_ad_hoc_flag_in_live_plan(self):
+        adhoc = item(2, "T", 20, 10)
+        adhoc["ad_hoc"] = 1
+        plan = reschedule(dt(9), dt(10), [
+            item(1, "A", 20, 10, actual_end=iso(dt(9, 20))), adhoc,
+        ], [], iso(dt(9, 20)))
+        segs = by_id(plan)
+        self.assertTrue(segs["2"]["ad_hoc"])
+        self.assertFalse(segs["1"]["ad_hoc"])
+
+
 if __name__ == "__main__":
     unittest.main()

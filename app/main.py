@@ -14,8 +14,8 @@ from .scheduler import (
     build_original, parse_dt, reschedule, suggest_postponements,
 )
 from .schemas import (
-    ActualIn, BreakCreate, ItemCreate, MeetingCreate, MoveIn, PostponeIn,
-    RevisionIn,
+    ActualIn, AdHocItemIn, BreakCreate, ItemCreate, MeetingCreate, MoveIn,
+    PostponeIn, RevisionIn,
 )
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -168,6 +168,31 @@ def api_move_item(item_id: int, body: MoveIn):
         raise HTTPException(409, "会议已开始录入，不能调整议程顺序")
     items = db.move_item(item["meeting_id"], item_id, body.direction)
     return items
+
+
+@app.post("/api/meetings/{meeting_id}/ad-hoc-items", status_code=201)
+def api_insert_ad_hoc_item(meeting_id: int, body: AdHocItemIn):
+    """Insert a temporary agenda item while the meeting is live.
+
+    The item lands right after the last completed item (before every
+    unfinished one), the plan is re-scheduled immediately and the whole
+    insert is one undoable step guarded by the meeting revision.
+    """
+    _get_meeting_or_404(meeting_id)
+    if not _is_live(meeting_id):
+        raise HTTPException(409, "实况开始后才能插入临时议题")
+    if body.minimum_minutes > body.planned_minutes:
+        raise HTTPException(422, "最短时长不能大于计划时长")
+    try:
+        db.insert_ad_hoc_item(meeting_id, body.title.strip(),
+                              body.planned_minutes, body.minimum_minutes,
+                              body.priority, body.revision)
+    except db.RevisionConflict:
+        raise _revision_conflict(
+            "计划已被其他操作更新（版本不一致），已刷新最新计划，请确认后重新提交。")
+    except ValueError:
+        raise HTTPException(409, "实况开始后才能插入临时议题")
+    return _build_plan(db.get_meeting(meeting_id))
 
 
 # ---------------------------------------------------------------------------

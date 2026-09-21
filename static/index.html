@@ -106,6 +106,27 @@
         </section>
       </div>
 
+      <!-- ad-hoc item (live only) -->
+      <section class="card adhoc-card" id="adhocCard">
+        <h3>⚡ 插入临时议题 <span class="count" id="adhocState"></span></h3>
+        <form id="adhocForm" class="adhoc-grid">
+          <label>标题<input type="text" id="tTitle" placeholder="例如：临时增加的通报" required></label>
+          <label>计划时长（分钟）<input type="number" id="tPlanned" min="1" value="10" required></label>
+          <label>最短时长（分钟）<input type="number" id="tMin" min="0" value="5" required></label>
+          <label>优先级
+            <select id="tPriority">
+              <option value="1">1 - 最低</option>
+              <option value="2">2</option>
+              <option value="3" selected>3 - 普通</option>
+              <option value="4">4</option>
+              <option value="5">5 - 最高</option>
+            </select>
+          </label>
+          <button type="submit" class="btn btn-primary adhoc-submit">插入并重排</button>
+        </form>
+        <p class="hint" id="adhocHint">仅实况开始后可提交：议题固定插入到最后一个已完成项之后、所有未完成项之前，标记为“临时”并立即按现有规则重排；一次撤销即可完整移除。</p>
+      </section>
+
       <!-- agenda & breaks lists -->
       <div class="two-col">
         <section class="card">

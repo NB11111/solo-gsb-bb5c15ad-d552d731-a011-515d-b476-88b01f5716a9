@@ -51,7 +51,8 @@ def init_db() -> None:
                 incompressible INTEGER NOT NULL DEFAULT 0,
                 sort_order INTEGER NOT NULL DEFAULT 0,
                 actual_end TEXT,
-                postponed INTEGER NOT NULL DEFAULT 0
+                postponed INTEGER NOT NULL DEFAULT 0,
+                ad_hoc INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS breaks (
@@ -76,6 +77,11 @@ def init_db() -> None:
         if "postponed" not in cols:
             conn.execute(
                 "ALTER TABLE items ADD COLUMN postponed INTEGER NOT NULL DEFAULT 0")
+
+        # migrate databases created before ad-hoc (temporary) agenda items
+        if "ad_hoc" not in cols:
+            conn.execute(
+                "ALTER TABLE items ADD COLUMN ad_hoc INTEGER NOT NULL DEFAULT 0")
 
         # migrate databases created before optimistic concurrency (revision)
         mcols = {r["name"] for r in conn.execute("PRAGMA table_info(meetings)")}
@@ -248,6 +254,51 @@ def record_actual(meeting_id: int, item_id: int, actual_end: str,
             "SELECT * FROM items WHERE id = ?", (item_id,)).fetchone())
 
 
+def insert_ad_hoc_item(meeting_id: int, title: str, planned: int, minimum: int,
+                       priority: int, expected_revision: int) -> dict:
+    """Insert a temporary agenda item into a live meeting, atomically.
+
+    The item is placed right after the last completed item (and before every
+    unfinished one), flagged ``ad_hoc``. The revision compare, the undo
+    snapshot, the insert itself and the revision bump all happen inside one
+    ``BEGIN IMMEDIATE`` transaction, so a stale revision rolls everything
+    back. A single undo pops the snapshot and removes the item again.
+    """
+    with _lock, get_conn() as conn:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            _check_revision(conn, meeting_id, expected_revision)
+            rows = conn.execute(
+                "SELECT * FROM items WHERE meeting_id = ? ORDER BY sort_order, id",
+                (meeting_id,)).fetchall()
+            done_orders = [r["sort_order"] for r in rows if r["actual_end"]]
+            if not done_orders:
+                raise ValueError("meeting is not live")
+            # insertion point: directly after the last completed item
+            last_done = max(done_orders)
+            following = [r["sort_order"] for r in rows if r["sort_order"] > last_done]
+            position = min(following) if following else last_done + 1
+            snapshot = _snapshot(conn, meeting_id)
+            conn.execute(
+                "UPDATE items SET sort_order = sort_order + 1 "
+                "WHERE meeting_id = ? AND sort_order >= ?",
+                (meeting_id, position))
+            cur = conn.execute(
+                """INSERT INTO items (meeting_id, title, planned_minutes,
+                                      minimum_minutes, priority, incompressible,
+                                      sort_order, ad_hoc)
+                   VALUES (?, ?, ?, ?, ?, 0, ?, 1)""",
+                (meeting_id, title, planned, minimum, priority, position))
+            _push_undo(conn, meeting_id, "ad_hoc", snapshot)
+            _bump_revision(conn, meeting_id)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        return dict(conn.execute(
+            "SELECT * FROM items WHERE id = ?", (cur.lastrowid,)).fetchone())
+
+
 def undo_last(meeting_id: int, expected_revision: int) -> bool:
     """Restore the item states captured by the most recent live entry."""
     with _lock, get_conn() as conn:
@@ -263,13 +314,25 @@ def undo_last(meeting_id: int, expected_revision: int) -> bool:
                 conn.rollback()
                 return False
             items = json.loads(log["snapshot"])
+            snapshot_ids = [it["id"] for it in items]
             for it in items:
                 conn.execute(
-                    "UPDATE items SET actual_end = ? WHERE id = ? AND meeting_id = ?",
-                    (it["actual_end"], it["id"], meeting_id))
+                    "UPDATE items SET actual_end = ?, postponed = ?, sort_order = ? "
+                    "WHERE id = ? AND meeting_id = ?",
+                    (it["actual_end"], 1 if it.get("postponed") else 0,
+                     it["sort_order"], it["id"], meeting_id))
+            # ad-hoc items inserted after the snapshot are removed again, so
+            # undoing an insertion restores the exact pre-insert agenda
+            if snapshot_ids:
+                placeholders = ",".join("?" for _ in snapshot_ids)
                 conn.execute(
-                    "UPDATE items SET postponed = ? WHERE id = ? AND meeting_id = ?",
-                    (1 if it.get("postponed") else 0, it["id"], meeting_id))
+                    f"DELETE FROM items WHERE meeting_id = ? AND ad_hoc = 1 "
+                    f"AND id NOT IN ({placeholders})",
+                    (meeting_id, *snapshot_ids))
+            else:
+                conn.execute(
+                    "DELETE FROM items WHERE meeting_id = ? AND ad_hoc = 1",
+                    (meeting_id,))
             conn.execute("DELETE FROM undo_log WHERE id = ?", (log["id"],))
             _bump_revision(conn, meeting_id)
             conn.commit()

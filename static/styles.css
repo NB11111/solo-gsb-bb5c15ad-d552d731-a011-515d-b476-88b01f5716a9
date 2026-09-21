@@ -122,6 +122,20 @@ input:focus, select:focus { outline: 2px solid rgba(47, 111, 237, .25); border-c
 .pill-p4 { background: #e3f3ea; color: #24754e; }
 .pill-p5 { background: #dff0e4; color: #17633b; }
 .tag-lock { background: #ece7fa; color: #5f43b5; border-radius: 6px; padding: 1px 7px; font-size: .74rem; margin-left: 4px; }
+.tag-adhoc {
+  background: #fff3d6; color: #9a6a00; border-radius: 6px;
+  padding: 1px 7px; font-size: .74rem; margin-left: 4px; font-weight: 700;
+}
+
+/* ad-hoc (temporary) item form */
+.adhoc-card { border-left: 4px solid var(--amber); }
+.adhoc-grid {
+  display: grid; grid-template-columns: 2fr 1fr 1fr 1fr auto;
+  gap: 12px; align-items: end;
+}
+.adhoc-grid label { margin-bottom: 0; }
+.adhoc-submit { height: 38px; white-space: nowrap; }
+@media (max-width: 900px) { .adhoc-grid { grid-template-columns: 1fr 1fr; } }
 .actual-val { font-weight: 700; color: var(--green); white-space: nowrap; }
 .mini-btn {
   border: 1px solid var(--line); background: #fbfcfe; border-radius: 6px;

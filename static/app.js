@@ -139,6 +139,9 @@ function setFormsLocked(live) {
   $("#itemHint").textContent = live
     ? "会议进行中：撤销或重置实况后才能修改议程。"
     : "可压缩议程在超时后按优先级从低到高压缩，且不会低于最短时长。";
+  // the ad-hoc form is the inverse: only usable once recording has started
+  for (const el of $("#adhocForm").elements) el.disabled = !live;
+  $("#adhocState").textContent = live ? "实况中，可插入" : "实况开始后可用";
 }
 
 function renderMeetingBar() {
@@ -210,10 +213,11 @@ function renderItemTable() {
   const ordered = [...p.items].sort((a, b) => a.sort_order - b.sort_order || a.id - b.id);
   const firstPending = ordered.find((it) => !it.actual_end && !it.postponed);
   tbody.innerHTML = ordered.map((it, i) => {
-    const attrs = it.postponed
+    const adhocTag = it.ad_hoc ? `<span class="tag-adhoc">⚡ 临时</span>` : "";
+    const attrs = adhocTag + (it.postponed
       ? `<span class="tag-postponed">⏭ 已延期</span>`
       : it.incompressible
-        ? `<span class="tag-lock">🔒 不可压缩</span>` : `<span class="muted">可压缩</span>`;
+        ? `<span class="tag-lock">🔒 不可压缩</span>` : `<span class="muted">可压缩</span>`);
     let actions;
     if (it.actual_end) {
       actions = `<span class="muted">已完成</span>`;
@@ -318,8 +322,9 @@ function renderTimeline(container, plan, opts = {}) {
     bar.style.width = width + "%";
     const delta = seg.kind === "item" ? seg.duration - seg.planned_duration : 0;
     const deltaTxt = delta < 0 ? `（压缩 ${-delta}′）` : "";
-    bar.title = `${seg.title}\n${seg.start_time}–${seg.end_time} · ${seg.duration}分钟${deltaTxt}`;
-    bar.textContent = `${seg.title} ${seg.duration}′${deltaTxt ? " " + deltaTxt : ""}`;
+    const adhocMark = seg.ad_hoc ? "⚡ " : "";
+    bar.title = `${adhocMark ? "[临时] " : ""}${seg.title}\n${seg.start_time}–${seg.end_time} · ${seg.duration}分钟${deltaTxt}`;
+    bar.textContent = `${adhocMark}${seg.title} ${seg.duration}′${deltaTxt ? " " + deltaTxt : ""}`;
     (seg.kind === "break" ? breakLane : itemLane).appendChild(bar);
     any = true;
   }
@@ -444,6 +449,35 @@ $("#breakForm").addEventListener("submit", async (e) => {
     toast("固定休息段已添加");
   } catch (err) {
     toast(err.message, true);
+  }
+});
+
+// ad-hoc (temporary) item: live meetings only, undoable in one step
+$("#adhocForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  try {
+    const planned = Number($("#tPlanned").value);
+    const minimum = Number($("#tMin").value);
+    if (minimum > planned) throw new Error("最短时长不能大于计划时长");
+    state.plan = await api("POST", `/api/meetings/${state.currentId}/ad-hoc-items`, {
+      title: $("#tTitle").value.trim(),
+      planned_minutes: planned,
+      minimum_minutes: minimum,
+      priority: Number($("#tPriority").value),
+      revision: state.plan.revision,
+    });
+    $("#tTitle").value = "";
+    renderAll();
+    const n = state.plan.current.conflicts.length;
+    toast(n ? `临时议题已插入并重排：发现 ${n} 项冲突` : "临时议题已插入并完成重排（可撤销移除）");
+  } catch (err) {
+    if (isStaleRevision(err)) {
+      // keep the form content so the user can retry against the fresh plan
+      await refreshAfterConflict();
+      toast(err.message + " 表单内容已保留，可直接重试。", true);
+    } else {
+      toast(err.message, true);
+    }
   }
 });
 

@@ -54,6 +54,15 @@ class RevisionIn(BaseModel):
     revision: int = Field(ge=0)
 
 
+class AdHocItemIn(BaseModel):
+    """Temporary agenda item inserted while the meeting is live."""
+    title: str = Field(min_length=1, max_length=100)
+    planned_minutes: int = Field(gt=0, le=600)
+    minimum_minutes: int = Field(ge=0, le=600)
+    priority: int = Field(default=3, ge=1, le=5)
+    revision: int = Field(ge=0)
+
+
 class PostponeIn(BaseModel):
     item_ids: list[int] = Field(min_length=1, max_length=500)
     # must match the revision returned together with the confirmed preview

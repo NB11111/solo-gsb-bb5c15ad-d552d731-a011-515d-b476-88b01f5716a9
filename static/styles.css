@@ -97,6 +97,20 @@ input:focus, select:focus { outline: 2px solid rgba(47, 111, 237, .25); border-c
 .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
 @media (max-width: 900px) { .two-col { grid-template-columns: 1fr; } .form-grid { grid-template-columns: 1fr; } .span2 { grid-column: span 1; } }
 
+/* ad-hoc (temporary) item insertion form */
+.adhoc-grid {
+  display: grid; grid-template-columns: 2fr 1fr 1fr 1fr auto;
+  gap: 12px; align-items: end;
+}
+.adhoc-grid label { margin-bottom: 0; }
+.adhoc-submit { display: flex; flex-direction: column; gap: 6px; align-items: stretch; }
+.adhoc-submit .hint { margin: 0; white-space: nowrap; }
+@media (max-width: 1000px) {
+  .adhoc-grid { grid-template-columns: 1fr 1fr; }
+  .adhoc-title, .adhoc-submit { grid-column: span 2; }
+  .adhoc-submit .hint { white-space: normal; }
+}
+
 /* meeting bar */
 .meeting-bar { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
 .meeting-bar-actions { display: flex; gap: 10px; align-items: center; }
@@ -122,6 +136,14 @@ input:focus, select:focus { outline: 2px solid rgba(47, 111, 237, .25); border-c
 .pill-p4 { background: #e3f3ea; color: #24754e; }
 .pill-p5 { background: #dff0e4; color: #17633b; }
 .tag-lock { background: #ece7fa; color: #5f43b5; border-radius: 6px; padding: 1px 7px; font-size: .74rem; margin-left: 4px; }
+.tag-adhoc {
+  background: #fff0d6; color: #b36b00; border: 1px solid #f0d29a;
+  border-radius: 6px; padding: 1px 7px; font-size: .74rem; margin-left: 4px;
+  font-weight: 700;
+}
+.card > h3 .tag-adhoc { vertical-align: middle; }
+tr.row-adhoc td { background: #fffaf0; }
+tr.row-adhoc strong { color: #9a5f06; }
 .actual-val { font-weight: 700; color: var(--green); white-space: nowrap; }
 .mini-btn {
   border: 1px solid var(--line); background: #fbfcfe; border-radius: 6px;
@@ -203,6 +225,12 @@ tr.row-postponed strong { color: #8a7fb5; }
   background: repeating-linear-gradient(45deg, var(--amber), var(--amber) 6px, #d8941f 6px, #d8941f 12px);
 }
 .bar-completed { background: var(--green); }
+/* temporary items keep the status color but get a dashed amber outline */
+.bar-adhoc {
+  outline: 2px dashed #ffcf7a;
+  outline-offset: -1px;
+  box-shadow: inset 0 -2px 0 rgba(0,0,0,.12), inset 0 0 0 9999px rgba(179, 107, 0, .12);
+}
 .bar-conflict {
   background: repeating-linear-gradient(45deg, var(--danger), var(--danger) 6px, #b83333 6px, #b83333 12px);
 }
@@ -236,6 +264,11 @@ tr.row-postponed strong { color: #8a7fb5; }
 .sw-compressed { background: var(--amber); }
 .sw-completed { background: var(--green); }
 .sw-break { background: var(--break-c); }
+.sw-adhoc {
+  background: var(--primary);
+  outline: 2px dashed #d0932a;
+  outline-offset: -2px;
+}
 .sw-conflict { background: var(--danger); }
 .sw-now { border-left: 3px dashed var(--danger); width: 3px; border-radius: 0; }
 

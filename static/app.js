@@ -136,9 +136,14 @@ function setFormsLocked(live) {
   for (const fid of ["itemForm", "breakForm"]) {
     for (const el of $("#" + fid).elements) el.disabled = live;
   }
+  // the ad-hoc form works in the opposite direction: only while live
+  for (const el of $("#adHocForm").elements) el.disabled = !live;
   $("#itemHint").textContent = live
     ? "会议进行中：撤销或重置实况后才能修改议程。"
     : "可压缩议程在超时后按优先级从低到高压缩，且不会低于最短时长。";
+  $("#adHocHint").textContent = live
+    ? "新议题固定插入到最后一个已完成项之后、所有未完成项之前，立即按既有规则重排；一次撤销即可完整移除。"
+    : "会议开始实况录入后才能插入临时议题。";
 }
 
 function renderMeetingBar() {
@@ -210,10 +215,11 @@ function renderItemTable() {
   const ordered = [...p.items].sort((a, b) => a.sort_order - b.sort_order || a.id - b.id);
   const firstPending = ordered.find((it) => !it.actual_end && !it.postponed);
   tbody.innerHTML = ordered.map((it, i) => {
-    const attrs = it.postponed
+    const adhocTag = it.ad_hoc ? `<span class="tag-adhoc">⚡ 临时</span>` : "";
+    const attrs = adhocTag + (it.postponed
       ? `<span class="tag-postponed">⏭ 已延期</span>`
       : it.incompressible
-        ? `<span class="tag-lock">🔒 不可压缩</span>` : `<span class="muted">可压缩</span>`;
+        ? `<span class="tag-lock">🔒 不可压缩</span>` : `<span class="muted">可压缩</span>`);
     let actions;
     if (it.actual_end) {
       actions = `<span class="muted">已完成</span>`;
@@ -229,13 +235,13 @@ function renderItemTable() {
         <button class="mini-btn" data-act="down" data-id="${it.id}" ${i === ordered.length - 1 || p.live ? "disabled" : ""}>↓</button>
         <button class="btn-danger-mini" data-act="del" data-id="${it.id}" ${p.live ? "disabled" : ""}>删除</button>`;
     }
-    return `<tr class="${it.postponed ? "row-postponed" : ""}">
+    return `<tr class="${it.postponed ? "row-postponed" : it.ad_hoc ? "row-adhoc" : ""}">
       <td>${i + 1}</td>
       <td><strong>${escapeHtml(it.title)}</strong>${attrs}</td>
       <td>${it.planned_minutes}′</td>
       <td>${it.minimum_minutes}′</td>
       <td>${priorityPill(it.priority)}</td>
-      <td>${it.postponed ? "已延期" : it.incompressible ? "保持计划时长" : "可压缩至最短"}</td>
+      <td>${it.postponed ? "已延期" : (it.ad_hoc ? "临时议题 · " : "") + (it.incompressible ? "保持计划时长" : "可压缩至最短")}</td>
       <td>${it.actual_end ? `<span class="actual-val">${hm(it.actual_end)}</span>`
         : it.postponed ? `<span class="postponed-val">延期</span>` : "—"}</td>
       <td>${actions}</td>
@@ -314,12 +320,14 @@ function renderTimeline(container, plan, opts = {}) {
     const bar = document.createElement("div");
     const width = Math.max((seg.duration / spanMin) * 100, seg.duration ? 0.8 : 0);
     bar.className = "tl-bar " + barClass(seg);
+    if (seg.kind === "item" && seg.ad_hoc) bar.classList.add("bar-adhoc");
     bar.style.left = pct(seg.start) + "%";
     bar.style.width = width + "%";
     const delta = seg.kind === "item" ? seg.duration - seg.planned_duration : 0;
     const deltaTxt = delta < 0 ? `（压缩 ${-delta}′）` : "";
-    bar.title = `${seg.title}\n${seg.start_time}–${seg.end_time} · ${seg.duration}分钟${deltaTxt}`;
-    bar.textContent = `${seg.title} ${seg.duration}′${deltaTxt ? " " + deltaTxt : ""}`;
+    const tag = seg.kind === "item" && seg.ad_hoc ? "⚡ " : "";
+    bar.title = `${tag}${seg.title}\n${seg.start_time}–${seg.end_time} · ${seg.duration}分钟${deltaTxt}`;
+    bar.textContent = `${tag}${seg.title} ${seg.duration}′${deltaTxt ? " " + deltaTxt : ""}`;
     (seg.kind === "break" ? breakLane : itemLane).appendChild(bar);
     any = true;
   }
@@ -447,9 +455,45 @@ $("#breakForm").addEventListener("submit", async (e) => {
   }
 });
 
+$("#adHocForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  // remember the typed values: on a revision conflict we refresh but keep
+  // the form filled so the operator can retry without retyping
+  const draft = {
+    title: $("#aTitle").value,
+    planned: $("#aPlanned").value,
+    minimum: $("#aMin").value,
+    priority: $("#aPriority").value,
+  };
+  try {
+    const planned = Number(draft.planned);
+    const minimum = Number(draft.minimum);
+    if (!draft.title.trim()) throw new Error("请填写临时议题标题");
+    if (minimum > planned) throw new Error("最短时长不能大于计划时长");
+    state.plan = await api("POST",
+      `/api/meetings/${state.currentId}/ad-hoc-items`, {
+        title: draft.title.trim(),
+        planned_minutes: planned,
+        minimum_minutes: minimum,
+        priority: Number(draft.priority),
+        revision: state.plan.revision,
+      });
+    renderAll();
+    $("#aTitle").value = "";
+    toast("已插入临时议题并完成重排（可撤销移除）");
+  } catch (err) {
+    if (isStaleRevision(err)) await refreshAfterConflict();
+    // keep every input (including the typed title) for an immediate retry
+    $("#aTitle").value = draft.title;
+    $("#aPlanned").value = draft.planned;
+    $("#aMin").value = draft.minimum;
+    $("#aPriority").value = draft.priority;
+    toast(err.message, true);
+  }
+});
+
 // delegated table actions
-document.addEventListener("click", async (e) => {
-  const btn = e.target.closest("[data-act]");
+document.addEventListener("click", async (e) => {  const btn = e.target.closest("[data-act]");
   if (!btn) return;
   const act = btn.dataset.act;
   const id = Number(btn.dataset.id);

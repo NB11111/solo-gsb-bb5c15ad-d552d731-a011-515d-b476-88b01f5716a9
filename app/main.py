@@ -14,8 +14,8 @@ from .scheduler import (
     build_original, parse_dt, reschedule, suggest_postponements,
 )
 from .schemas import (
-    ActualIn, BreakCreate, ItemCreate, MeetingCreate, MoveIn, PostponeIn,
-    RevisionIn,
+    ActualIn, AdHocItemCreate, BreakCreate, ItemCreate, MeetingCreate, MoveIn,
+    PostponeIn, RevisionIn,
 )
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -28,7 +28,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="会议议程实时重排", version="1.1.0", lifespan=lifespan)
+app = FastAPI(title="会议议程实时重排", version="1.2.0", lifespan=lifespan)
 
 
 # ---------------------------------------------------------------------------
@@ -270,6 +270,32 @@ def api_reset(meeting_id: int, body: RevisionIn):
     except db.RevisionConflict:
         raise _revision_conflict(
             "计划已被其他操作更新（版本不一致），已刷新计划，请重新重置。")
+    return _build_plan(db.get_meeting(meeting_id))
+
+
+# ---------------------------------------------------------------------------
+# postponement suggestions (延期建议)
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# ad-hoc (temporary) agenda items inserted while live
+# ---------------------------------------------------------------------------
+
+@app.post("/api/meetings/{meeting_id}/ad-hoc-items")
+def api_insert_ad_hoc_item(meeting_id: int, body: AdHocItemCreate):
+    """Insert a temporary item after the last completed item and re-schedule."""
+    meeting = _get_meeting_or_404(meeting_id)
+    if not _is_live(meeting_id):
+        raise HTTPException(409, "会议尚未开始录入，不能插入临时议题")
+    if body.minimum_minutes > body.planned_minutes:
+        raise HTTPException(422, "最短时长不能大于计划时长")
+    try:
+        db.insert_ad_hoc_item(
+            meeting_id, body.title.strip(), body.planned_minutes,
+            body.minimum_minutes, body.priority, body.revision)
+    except db.RevisionConflict:
+        raise _revision_conflict(
+            "计划已被其他操作更新（版本不一致），已刷新计划，请核对后重新提交临时议题。")
     return _build_plan(db.get_meeting(meeting_id))
 
 

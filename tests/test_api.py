@@ -36,8 +36,9 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(r.status_code, 201)
         self.mid = r.json()["id"]
 
-    def add_item(self, title, planned, minimum, priority=3, incompressible=False):
-        r = self.client.post(f"/api/meetings/{self.mid}/items", json={
+    def add_item(self, title, planned, minimum, priority=3, incompressible=False,
+                 mid=None):
+        r = self.client.post(f"/api/meetings/{mid or self.mid}/items", json={
             "title": title, "planned_minutes": planned,
             "minimum_minutes": minimum, "priority": priority,
             "incompressible": incompressible,
@@ -45,8 +46,8 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(r.status_code, 201, r.text)
         return r.json()["id"]
 
-    def add_break(self, start, duration, title="茶歇"):
-        r = self.client.post(f"/api/meetings/{self.mid}/breaks", json={
+    def add_break(self, start, duration, title="茶歇", mid=None):
+        r = self.client.post(f"/api/meetings/{mid or self.mid}/breaks", json={
             "title": title, "fixed_start": start, "duration_minutes": duration,
         })
         self.assertEqual(r.status_code, 201, r.text)
@@ -91,6 +92,16 @@ class ApiTest(unittest.TestCase):
         return self.client.post(
             f"/api/meetings/{mid or self.mid}/postponements",
             json={"item_ids": item_ids, "revision": revision})
+
+    def insert_ad_hoc(self, title, planned, minimum, priority=3,
+                      mid=None, revision=None):
+        mid = mid or self.mid
+        if revision is None:
+            revision = self.revision(mid)
+        return self.client.post(f"/api/meetings/{mid}/ad-hoc-items", json={
+            "title": title, "planned_minutes": planned,
+            "minimum_minutes": minimum, "priority": priority,
+            "revision": revision})
 
     def test_meeting_validation(self):
         r = self.client.post("/api/meetings", json={
@@ -353,6 +364,173 @@ class ApiTest(unittest.TestCase):
         self.assertTrue(data["live"])
         self.assertTrue(any(it["id"] == b and it["postponed"] for it in data["items"]))
 
+    # ------------------------------------------------------------------ ad-hoc items
+    def test_ad_hoc_requires_live_meeting(self):
+        self.add_item("A", 20, 10)
+        r = self.insert_ad_hoc("临时X", 10, 5)
+        self.assertEqual(r.status_code, 409, r.text)
+        self.assertEqual(r.json()["detail"], "会议尚未开始录入，不能插入临时议题")
+
+    def test_ad_hoc_inserted_after_last_completed_before_pending(self):
+        a = self.add_item("A", 20, 10)
+        b = self.add_item("B", 20, 10)
+        c = self.add_item("C", 20, 10)
+        # A finishes on time at 09:20; 40 minutes remain for B(20)+C(20)
+        r = self.record_actual(a, "2026-09-21T09:20")
+        self.assertEqual(r.status_code, 200)
+        r = self.insert_ad_hoc("临时X", 10, 5, priority=1)
+        self.assertEqual(r.status_code, 200, r.text)
+        data = r.json()
+        x = next(it for it in data["items"] if it["title"] == "临时X")
+        self.assertTrue(x["ad_hoc"])
+        self.assertEqual(data["revision"], 2)
+        self.assertEqual(data["undo_count"], 2)
+        order = [it["title"] for it in
+                 sorted(data["items"], key=lambda it: (it["sort_order"], it["id"]))]
+        self.assertEqual(order, ["A", "临时X", "B", "C"])
+        # reschedule applied immediately: X(P1) is compressed 10->5 first,
+        # then B(P3) 20->15, so 09:20 + 5 + 15 + 20 fills exactly to 10:00
+        segs = {s["id"]: s for s in data["current"]["segments"] if s["kind"] == "item"}
+        self.assertEqual(segs[x["id"]]["ad_hoc"], True)
+        self.assertEqual(segs[x["id"]]["status"], "compressed")
+        self.assertEqual(segs[x["id"]]["duration"], 5)
+        self.assertEqual(segs[x["id"]]["start_time"], "09:20")
+        self.assertEqual(segs[b]["start_time"], "09:25")
+        self.assertEqual(segs[b]["duration"], 15)
+        self.assertEqual(segs[c]["duration"], 20)
+        self.assertEqual(data["current"]["planned_end"], "2026-09-21T10:00")
+        self.assertEqual(data["current"]["conflicts"], [])
+
+    def test_ad_hoc_position_with_postponed_and_break(self):
+        r = self.client.post("/api/meetings", json={
+            "title": "长会", "start_time": "2026-09-21T09:00",
+            "end_time": "2026-09-21T10:30"})
+        mid = r.json()["id"]
+        a = self.add_item("A", 20, 10, mid=mid)
+        b = self.add_item("B", 20, 10, mid=mid)
+        c = self.add_item("C", 20, 10, mid=mid)
+        self.add_break("2026-09-21T10:00", 10, mid=mid)
+        self.record_actual(a, "2026-09-21T09:20", mid=mid)
+        # B is deferred out of the meeting (simulating an earlier postponement)
+        with db.get_conn() as conn:
+            conn.execute("UPDATE items SET postponed = 1 WHERE id = ?", (b,))
+        rev = self.revision(mid)
+        r = self.insert_ad_hoc("临时X", 20, 10, mid=mid, revision=rev)
+        self.assertEqual(r.status_code, 200, r.text)
+        data = r.json()
+        order = [(it["title"], it["postponed"]) for it in
+                 sorted(data["items"], key=lambda it: (it["sort_order"], it["id"]))]
+        # pinned after the last completed item A, before every unfinished item
+        # (the postponed B stays where it was, C moves one slot back)
+        self.assertEqual(order, [("A", False), ("临时X", False), ("B", True), ("C", False)])
+        segs = [s for s in data["current"]["segments"] if s["kind"] == "item"]
+        self.assertEqual([s["title"] for s in segs], ["A", "临时X", "C"])
+        self.assertLessEqual(
+            next(s for s in segs if s["title"] == "临时X")["end_time"], "10:00")
+
+    def test_ad_hoc_undo_removes_item_and_restores_order(self):
+        a = self.add_item("A", 20, 10)
+        b = self.add_item("B", 20, 10)
+        c = self.add_item("C", 20, 10)
+        self.record_actual(a, "2026-09-21T09:20")
+        r = self.insert_ad_hoc("临时X", 10, 5)
+        self.assertEqual(r.status_code, 200)
+        xid = next(it["id"] for it in r.json()["items"] if it["title"] == "临时X")
+        r = self.undo()
+        self.assertEqual(r.status_code, 200, r.text)
+        data = r.json()
+        self.assertFalse(any(it["id"] == xid for it in data["items"]))
+        order = [it["title"] for it in
+                 sorted(data["items"], key=lambda it: (it["sort_order"], it["id"]))]
+        self.assertEqual(order, ["A", "B", "C"])
+        self.assertTrue(data["live"])
+        self.assertEqual(data["undo_count"], 1)
+
+    def test_ad_hoc_can_record_actual_then_undo_removes_it(self):
+        a = self.add_item("A", 20, 10)
+        b = self.add_item("B", 20, 10)
+        self.record_actual(a, "2026-09-21T09:20")
+        r = self.insert_ad_hoc("临时X", 10, 5)
+        self.assertEqual(r.status_code, 200)
+        xid = next(it["id"] for it in r.json()["items"] if it["title"] == "临时X")
+        # record the temporary item as completed (in-order check passes)
+        r = self.record_actual(xid, "2026-09-21T09:30")
+        self.assertEqual(r.status_code, 200, r.text)
+        # undo the actual, then undo the insertion: X is gone, B pending
+        self.assertEqual(self.undo().status_code, 200)
+        r = self.undo()
+        self.assertEqual(r.status_code, 200)
+        self.assertFalse(any(it["id"] == xid for it in r.json()["items"]))
+        self.assertTrue(any(it["id"] == b and not it["actual_end"]
+                            for it in r.json()["items"]))
+
+    def test_ad_hoc_eligible_for_postponement(self):
+        r = self.client.post("/api/meetings", json={
+            "title": "短会", "start_time": "2026-09-21T09:00",
+            "end_time": "2026-09-21T09:32"})
+        mid = r.json()["id"]
+        a = self.client.post(f"/api/meetings/{mid}/items", json={
+            "title": "A", "planned_minutes": 10, "minimum_minutes": 5,
+            "priority": 5}).json()["id"]
+        self.client.post(f"/api/meetings/{mid}/items", json={
+            "title": "Lock", "planned_minutes": 10, "minimum_minutes": 10,
+            "priority": 5, "incompressible": True})
+        hi = self.client.post(f"/api/meetings/{mid}/items", json={
+            "title": "Hi", "planned_minutes": 10, "minimum_minutes": 2,
+            "priority": 5}).json()["id"]
+        self.record_actual(a, "2026-09-21T09:20", mid=mid)
+        # insert a low-priority compressible temporary item: it must be the
+        # postponement candidate (ahead of the P5 item)
+        r = self.insert_ad_hoc("临时X", 10, 5, priority=1, mid=mid)
+        self.assertEqual(r.status_code, 200)
+        xid = next(it["id"] for it in r.json()["items"] if it["title"] == "临时X")
+        s = self.preview(mid).json()
+        self.assertEqual(s["item_ids"], [xid])
+        self.assertNotIn(hi, s["item_ids"])
+        self.assertTrue(s["feasible"])
+
+    def test_ad_hoc_revision_conflict_changes_nothing(self):
+        a = self.add_item("A", 20, 10)
+        self.add_item("B", 20, 10)
+        self.record_actual(a, "2026-09-21T09:20")
+        stale = self.revision()  # 1
+        # another temporary insert advances the revision to 2 while the
+        # meeting stays live; the stale insert must fail at the in-transaction
+        # revision compare and roll back completely
+        self.assertEqual(self.insert_ad_hoc(
+            "临时Y", 5, 2, revision=1).status_code, 200)
+        r = self.insert_ad_hoc("临时X", 10, 5, revision=stale)
+        self.assert_revision_conflict(r)
+        plan = self.get_plan()
+        self.assertEqual(plan["revision"], 2)
+        self.assertEqual(plan["undo_count"], 2)  # actual + first ad-hoc
+        self.assertFalse(any(it["title"] == "临时X" for it in plan["items"]))
+        self.assertTrue(any(it["title"] == "临时Y" for it in plan["items"]))
+
+    def test_ad_hoc_validation(self):
+        a = self.add_item("A", 20, 10)
+        self.record_actual(a, "2026-09-21T09:20")
+        rev = self.revision()
+        # minimum > planned
+        self.assertEqual(self.insert_ad_hoc(
+            "X", 10, 20, revision=rev).status_code, 422)
+        # missing revision
+        self.assertEqual(self.client.post(
+            f"/api/meetings/{self.mid}/ad-hoc-items",
+            json={"title": "X", "planned_minutes": 10,
+                  "minimum_minutes": 5}).status_code, 422)
+        # title too short / bad durations
+        self.assertEqual(self.client.post(
+            f"/api/meetings/{self.mid}/ad-hoc-items",
+            json={"title": "", "planned_minutes": 10, "minimum_minutes": 5,
+                  "revision": rev}).status_code, 422)
+        self.assertEqual(self.client.post(
+            f"/api/meetings/{self.mid}/ad-hoc-items",
+            json={"title": "X", "planned_minutes": 0, "minimum_minutes": 0,
+                  "revision": rev}).status_code, 422)
+        # revision untouched after failed validation
+        self.assertEqual(self.revision(), 1)
+
     # ------------------------------------------------------------------ revision / OCC
     def assert_revision_conflict(self, resp):
         self.assertEqual(resp.status_code, 409, resp.text)
@@ -460,6 +638,35 @@ class ApiTest(unittest.TestCase):
         s2 = self.preview(mid).json()
         self.assertEqual(s2["revision"], 3)
         self.assertEqual(self.confirm(s2["item_ids"], 3, mid=mid).status_code, 200)
+
+    def test_concurrent_ad_hoc_inserts_only_one_wins(self):
+        # Two clients race the ad-hoc insert transaction: the loser must get
+        # RevisionConflict and roll back, so exactly one temporary item and
+        # one revision bump survive.
+        a = self.add_item("A", 20, 10)
+        self.add_item("B", 20, 10)
+        self.record_actual(a, "2026-09-21T09:20")
+        barrier = threading.Barrier(2)
+        results = []
+
+        def insert(title):
+            barrier.wait()
+            results.append(self.insert_ad_hoc(title, 10, 5, revision=1))
+
+        t1 = threading.Thread(target=insert, args=("临时X",))
+        t2 = threading.Thread(target=insert, args=("临时Y",))
+        t1.start(); t2.start(); t1.join(); t2.join()
+
+        statuses = {r.status_code for r in results}
+        self.assertEqual(statuses, {200, 409})
+        conflict = next(r for r in results if r.status_code == 409)
+        self.assertEqual(conflict.json()["detail"]["code"],
+                         "revision_conflict")
+        plan = self.get_plan()
+        self.assertEqual(plan["revision"], 2)
+        self.assertEqual(plan["undo_count"], 2)
+        adhoc = [it for it in plan["items"] if it["ad_hoc"]]
+        self.assertEqual(len(adhoc), 1)
 
     def test_concurrent_actuals_only_one_wins(self):
         # Two clients race the record transaction itself. The leader reaches
@@ -611,8 +818,7 @@ class RevisionMigrationTest(unittest.TestCase):
                 sort_order INTEGER NOT NULL DEFAULT 0,
                 actual_end TEXT,
                 postponed INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE TABLE breaks (
+            );            CREATE TABLE breaks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 meeting_id INTEGER NOT NULL,
                 title TEXT NOT NULL DEFAULT '休息',
@@ -644,12 +850,25 @@ class RevisionMigrationTest(unittest.TestCase):
                 db.init_db()
                 meeting = db.get_meeting(1)
                 self.assertEqual(meeting["revision"], 0)
+                # the ad_hoc column is auto-migrated with default 0
+                legacy_item = db.get_item(1)
+                self.assertEqual(legacy_item["ad_hoc"], 0)
                 # a stale revision is rejected inside one transaction
                 with self.assertRaises(db.RevisionConflict):
                     db.record_actual(1, 1, "2026-09-21T09:10", 99)
                 # the correct migrated revision (0) is accepted and bumps it
                 db.record_actual(1, 1, "2026-09-21T09:10", 0)
                 self.assertEqual(db.get_meeting(1)["revision"], 1)
+                # an ad-hoc insert against the migrated schema works and is
+                # undone completely (row removed, original order restored)
+                db.insert_ad_hoc_item(1, "临时X", 5, 2, 3, 1)
+                rows = db.list_items(1)
+                self.assertTrue(any(it["title"] == "临时X" and it["ad_hoc"]
+                                    for it in rows))
+                self.assertTrue(db.undo_last(1, 2))
+                rows = db.list_items(1)
+                self.assertFalse(any(it["title"] == "临时X" for it in rows))
+                self.assertEqual(db.get_meeting(1)["revision"], 3)
             finally:
                 db.DB_PATH = old_path
         finally:

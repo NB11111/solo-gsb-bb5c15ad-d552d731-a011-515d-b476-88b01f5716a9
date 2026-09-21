@@ -33,6 +33,16 @@ class ItemCreate(BaseModel):
     incompressible: bool = False
 
 
+class AdHocItemCreate(BaseModel):
+    """Temporary agenda item inserted while the meeting is live."""
+    title: str = Field(min_length=1, max_length=100)
+    planned_minutes: int = Field(gt=0, le=600)
+    minimum_minutes: int = Field(ge=0, le=600)
+    priority: int = Field(default=3, ge=1, le=5)
+    # optimistic-concurrency token read from the latest plan
+    revision: int = Field(ge=0)
+
+
 class ActualIn(BaseModel):
     item_id: int
     actual_end: str

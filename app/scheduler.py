@@ -61,6 +61,7 @@ def _prep(items: list[dict]) -> list[dict]:
         it["priority"] = int(raw.get("priority") or 0)
         it["incompressible"] = bool(raw.get("incompressible"))
         it["postponed"] = bool(raw.get("postponed"))
+        it["ad_hoc"] = bool(raw.get("ad_hoc"))
         out.append(it)
     return out
 
@@ -92,6 +93,7 @@ def _item_seg(item: dict, start: datetime, duration: int, status: str,
         "minimum_duration": item["minimum"],
         "priority": item["priority"],
         "incompressible": item["incompressible"],
+        "ad_hoc": bool(item.get("ad_hoc")),
         "status": status,          # planned | completed | compressed | conflict
         "source": source,          # original | current
     }

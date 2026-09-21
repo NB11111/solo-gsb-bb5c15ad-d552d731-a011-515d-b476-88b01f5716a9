@@ -17,11 +17,12 @@ def iso(d):
 
 
 def item(id, title, planned, minimum, priority=3, incompressible=False,
-         actual_end=None):
+         actual_end=None, ad_hoc=False):
     return {
         "id": id, "title": title, "planned_minutes": planned,
         "minimum_minutes": minimum, "priority": priority,
         "incompressible": incompressible, "actual_end": actual_end,
+        "ad_hoc": ad_hoc,
     }
 
 
@@ -215,6 +216,51 @@ class TestReschedule(unittest.TestCase):
         self.assertEqual(len(conflicts), 1)
         self.assertIn(2, conflicts[0]["item_ids"])
         self.assertEqual(by_id(plan)["2"]["start_time"], "09:50")
+
+
+class TestAdHocItems(unittest.TestCase):
+    def test_ad_hoc_scheduled_after_completed_before_pending(self):
+        # A completed 09:20; temporary X (20/5, P1) inserted before B (20/10,
+        # P5): 40 minutes of pending work in a 40-minute gap must fit exactly,
+        # ordered X then B, and both carry the ad_hoc flag appropriately
+        plan = reschedule(dt(9), dt(10), [
+            item(1, "A", 20, 10, actual_end=iso(dt(9, 20))),
+            item(2, "临时X", 20, 5, priority=1, ad_hoc=True),
+            item(3, "B", 20, 10, priority=5),
+        ], [], iso(dt(9, 20)))
+        segs = [s for s in plan["segments"] if s["kind"] == "item"]
+        self.assertEqual([s["id"] for s in segs], [1, 2, 3])
+        self.assertTrue(segs[1]["ad_hoc"])
+        self.assertFalse(segs[2]["ad_hoc"])
+        self.assertEqual(segs[1]["start_time"], "09:20")
+        self.assertEqual(segs[1]["status"], "planned")
+        self.assertEqual(segs[2]["start_time"], "09:40")
+        self.assertEqual(plan["planned_end"], iso(dt(10)))
+        self.assertEqual(plan["conflicts"], [])
+
+    def test_ad_hoc_compressed_by_priority_like_any_item(self):
+        # 30-minute gap for 40 planned minutes: the low-priority temporary
+        # item is compressed first (20 -> 10), B keeps its planned 20
+        plan = reschedule(dt(9), dt(9, 50), [
+            item(1, "A", 20, 10, actual_end=iso(dt(9, 20))),
+            item(2, "临时X", 20, 5, priority=1, ad_hoc=True),
+            item(3, "B", 20, 10, priority=5),
+        ], [], iso(dt(9, 20)))
+        segs = by_id(plan)
+        self.assertEqual(segs["2"]["duration"], 10)
+        self.assertEqual(segs["2"]["status"], "compressed")
+        self.assertTrue(segs["2"]["ad_hoc"])
+        self.assertEqual(segs["3"]["duration"], 20)
+        self.assertEqual(plan["planned_end"], iso(dt(9, 50)))
+
+    def test_ad_hoc_flag_present_in_original_plan(self):
+        plan = build_original(dt(9), dt(10), [
+            item(1, "A", 20, 10, ad_hoc=True),
+            item(2, "B", 20, 10),
+        ], [])
+        segs = [s for s in plan["segments"] if s["kind"] == "item"]
+        self.assertTrue(segs[0]["ad_hoc"])
+        self.assertFalse(segs[1]["ad_hoc"])
 
 
 class TestSuggestPostponements(unittest.TestCase):
